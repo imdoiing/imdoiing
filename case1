@@ -1,0 +1,86 @@
+import pandas as pd
+import numpy as np
+import time
+
+# 파일 경로
+file_path = r"C:/Users/dohyu/Desktop/capstone/test2.txt"
+cache_path = r"C:/Users/dohyu/Desktop/capstone/r0_cache.txt"
+
+# SOH 기준표 불러오기
+df_soh = pd.read_csv(r"C:/Users/dohyu/Desktop/capstone/soh_final22.csv")
+df_soh = df_soh.rename(columns={df_soh.columns[1]: 'Internal_Resistance'})
+df_soh['Internal_Resistance'] = pd.to_numeric(df_soh['Internal_Resistance'], errors='coerce')
+
+def load_test_data():
+    df = pd.read_csv(file_path, delim_whitespace=True, skiprows=1,
+                     names=['Time', 'I', 'V1', 'Vload'])
+    df['Time'] = pd.to_numeric(df['Time'], errors='coerce')
+    df = df.dropna(subset=['Time'])
+    df['RoundedTime'] = df['Time'].round(6)
+    df = df[np.isclose(df['RoundedTime'] % 1, 0, atol=1e-6)]
+    df = df.drop_duplicates(subset='RoundedTime')
+    return df.reset_index(drop=True)
+
+def calculate_soh_and_r0(I, V1, Vload):
+    r_input = (2 * V1 - Vload) / I - 0.0048
+    closest_row = df_soh.iloc[(df_soh['Internal_Resistance'] - r_input).abs().idxmin()]
+    soh = int(closest_row['Cell_SOH'].replace('%', ''))
+    r0 = round(closest_row['Internal_Resistance'], 6)
+    return soh, r0, r_input
+
+# 초기 분석: 첫 번째 행 기준
+df_init = load_test_data()
+row0 = df_init.iloc[0]                 # ← 첫 번째 행 사용!
+t0 = time.time()                       # 시스템 기준 시간 (기준 시각 저장)
+t_data0 = row0['Time']                 # 기준 데이터의 Time 필드 (예: 0.0초)
+
+# 최초 분석 실행
+I0, V10, Vload0 = row0[['I', 'V1', 'Vload']]
+soh0, r0_0, r_input0 = calculate_soh_and_r0(I0, V10, Vload0)
+
+# r0 저장
+with open(cache_path, 'w') as f:
+    f.write(str(r0_0))
+
+# 초기 결과 출력
+print(">> [초기 분석 결과]")
+print(f"→ 기준 Time: {t_data0:.1f}초 (test2.txt)")
+print(f"→ I: {I0} | V1: {V10} | Vload: {Vload0}")
+print(f"→ 내부저항 계산: {r_input0:.6f} Ω")
+print(f"→ 초기 r₀ = {r0_0} Ω | SOH = {soh0}%")
+
+# 사용자 입력 루프
+while True:
+    cmd = input("\nSOH를 갱신하려면 yes 입력 (종료: no) > ").strip().lower()
+    if cmd == "no":
+        print("분석 종료.")
+        break
+    elif cmd != "yes":
+        print("잘못된 입력입니다.")
+        continue
+
+    # 현재까지의 실제 경과 시간
+    elapsed_real = time.time() - t0
+    target_time = t_data0 + round(elapsed_real)
+
+    df_now = load_test_data()
+    match = df_now[np.isclose(df_now['Time'], target_time, atol=0.1)]
+
+    if match.empty:
+        print(f"※ {target_time:.1f}초 시점 데이터 없음 → 최신 데이터 사용")
+        row = df_now.iloc[-1]
+    else:
+        row = match.iloc[0]
+
+    I, V1, Vload = row[['I', 'V1', 'Vload']]
+    soh, r0, r_input = calculate_soh_and_r0(I, V1, Vload)
+
+    # 캐시에 저장
+    with open(cache_path, 'w') as f:
+        f.write(str(r0))
+
+    print(f"\n[SOH 갱신 결과]")
+    print(f"→ 경과 시간: {elapsed_real:.1f}초 | 분석 Time: {row['Time']:.1f}초")
+    print(f"→ I: {I} | V1: {V1} | Vload: {Vload}")
+    print(f"→ 내부저항 계산: {r_input:.6f} Ω")
+    print(f"→ r₀ = {r0} Ω | SOH = {soh}%")
