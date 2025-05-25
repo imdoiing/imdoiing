@@ -1,0 +1,140 @@
+import pandas as pd
+import numpy as np
+import time
+import msvcrt
+
+# CSV 파일 불러오기 (SOH 기준표)
+df_soh = pd.read_csv(r'C:\Users\임도현\Desktop\soh_final22.csv')
+df_soh = df_soh.rename(columns={df_soh.columns[1]: 'Internal_Resistance'})
+df_soh['Internal_Resistance'] = pd.to_numeric(df_soh['Internal_Resistance'], errors='coerce')
+
+# 기준 내부저항 초기화
+r0 = None
+path_mode = None
+path_locked = False
+
+def evaluate_mul_state(mul):
+    global path_mode, path_locked
+    mul = round(mul, 2)
+
+    if mul in [1.0, 0.9] and path_locked:
+        print("[경로 초기화] 기준 상태 복귀 → 경로 재설정 가능")
+        path_mode = None
+        path_locked = False
+        return None
+
+    if not path_locked:
+        if mul == 0.9:
+            path_mode = '고온'
+            path_locked = True
+            print("[경로 설정] 고온 경로 시작")
+            return "열화 시작"
+        elif mul in [1.1, 1.3]:
+            path_mode = '저온'
+            path_locked = True
+            print("[경로 설정] 저온 경로 시작")
+            return None
+
+    if path_mode == '고온':
+        if mul == 1.1:
+            return "열화 가속"
+        elif mul == 1.3:
+            return "열폭주 위험 경고"
+
+    elif path_mode == '저온':
+        if mul == 1.7:
+            return "성능 저하"
+        elif mul == 2.5:
+            return "성능 저하 가속"
+        elif mul == 4.0:
+            return "전원 차단"
+
+    return None
+
+def calculate_r_input(I, V1, Vload):
+    if I == 0:
+        return None
+    return (2 * V1 - Vload) / I
+
+def print_soh_analysis(I, V1, Vload):
+    global r0
+
+    r_input = calculate_r_input(I, V1, Vload)
+    if r_input is None:
+        print("※ 전류가 0이므로 계산할 수 없습니다.")
+        return
+
+    closest_row = df_soh.iloc[(df_soh['Internal_Resistance'] - r_input).abs().idxmin()]
+    soh_str = closest_row['Cell_SOH'].replace('%', '')
+    soh = int(soh_str)
+
+    if soh == 90:
+        message = '성능 감소 시작 알림'
+    elif soh == 80:
+        message = '교체 권장'
+    elif soh <= 60:
+        message = '교체 강력 권고'
+    else:
+        message = ''
+
+    print(f"→ I: {round(I,3)} A | V1: {round(V1,3)} V | Vload: {round(Vload,3)} V")
+    print(f"→ 내부저항 계산: {round(r_input,6)} Ω")
+    print(f"→ SOH: {soh}% | 메시지: {message}")
+
+    if r0 is None:
+        r0 = round(closest_row['Internal_Resistance'], 6)
+        print(f"[기준 내부저항 r₀ = {r0} Ω] 설정됨")
+
+    mul = r_input / r0
+    warning = evaluate_mul_state(mul)
+    if warning:
+        print(f"→ mul: {round(mul,4)} → [경고] {warning}")
+    else:
+        print(f"→ mul: {round(mul,4)}")
+    print("-" * 50)
+
+    return r_input
+
+# 데이터 불러오기
+file_path = r"C:\Users\임도현\Desktop\test1.txt"
+df_raw = pd.read_csv(file_path, delim_whitespace=True, skiprows=1, names=['Time', 'I', 'V1', 'Vload'])
+
+df_raw['Time'] = pd.to_numeric(df_raw['Time'], errors='coerce')
+df_raw = df_raw.dropna(subset=['Time'])
+
+df_raw['RoundedTime'] = df_raw['Time'].round(6)
+df_int = df_raw[np.isclose(df_raw['RoundedTime'] % 1, 0, atol=1e-6)].copy()
+df_int_unique = df_int.drop_duplicates(subset='RoundedTime')
+data_array = df_int_unique[['RoundedTime', 'I', 'V1', 'Vload']].to_numpy()
+
+print("\n[자동 분석 시작] → s 키를 누르면 SOH 분석을 출력합니다.\n")
+
+for i, row in enumerate(data_array):
+    t, I, V1, Vload = row
+    print(f"[{int(t)}초]")
+
+    r_input = calculate_r_input(I, V1, Vload)
+    if r_input is None:
+        print("※ 전류가 0이므로 계산 생략")
+        continue
+
+    if i == 0 or r0 is None:
+        print_soh_analysis(I, V1, Vload)
+    else:
+        mul = r_input / r0
+        warning = evaluate_mul_state(mul)
+        if warning:
+            print(f"→ mul: {round(mul,4)} → [경고] {warning}")
+        else:
+            print(f"→ mul: {round(mul,4)}")
+
+    # 1초 동안 키 입력 감지 반복
+    for _ in range(10):  # 0.1초 × 10 = 1초
+        if msvcrt.kbhit():
+            key = msvcrt.getch()
+            if key in [b's', b'S']:
+                print("[사용자 요청 → SOH 재분석]")
+                print_soh_analysis(I, V1, Vload)
+        time.sleep(0.1)
+
+print("\n[분석 완료]") 
