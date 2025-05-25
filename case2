@@ -61,7 +61,7 @@ def evaluate_mul_state(mul):
 
     # 경로 진입 조건
     if not path_locked:
-        if mul <= 0.9:
+        if mul >= 0.9:
             path_mode = '고온'
             path_locked = True
             last_alarm_level = alarm_levels['열화 시작']
