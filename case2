@@ -3,120 +3,84 @@ import numpy as np
 import time
 
 # 파일 경로
-raw_path = r"C:/Users/dohyu/Desktop/capstone/test1.txt"
+file_path = r"C:/Users/dohyu/Desktop/capstone/test2.txt"
 cache_path = r"C:/Users/dohyu/Desktop/capstone/r0_cache.txt"
 
-# 경고 단계 우선순위 정의
-alarm_levels = {
-    '열화 시작': 1,
-    '열화 가속': 2,
-    '열폭주 위험 경고': 3,
-    '성능 저하': 2,
-    '성능 저하 가속': 3,
-    '전원 차단': 4
-}
+# SOH 기준표 불러오기
+df_soh = pd.read_csv(r"C:/Users/dohyu/Desktop/capstone/soh_final22.csv")
+df_soh = df_soh.rename(columns={df_soh.columns[1]: 'Internal_Resistance'})
+df_soh['Internal_Resistance'] = pd.to_numeric(df_soh['Internal_Resistance'], errors='coerce')
 
-# 상태 변수 초기화
-path_mode = None
-path_locked = False
-last_alarm_level = 0
+def load_test_data():
+    df = pd.read_csv(file_path, delim_whitespace=True, skiprows=1,
+                     names=['Time', 'I', 'V1', 'Vload'])
+    df['Time'] = pd.to_numeric(df['Time'], errors='coerce')
+    df = df.dropna(subset=['Time'])
+    df['RoundedTime'] = df['Time'].round(6)
+    df = df[np.isclose(df['RoundedTime'] % 1, 0, atol=1e-6)]
+    df = df.drop_duplicates(subset='RoundedTime')
+    return df.reset_index(drop=True)
 
-
-# 데이터 불러오기
-df = pd.read_csv(raw_path, sep='\s+', skiprows=1, names=['Time', 'I', 'V1', 'Vload'])
-df['Time'] = pd.to_numeric(df['Time'], errors='coerce')
-
-# Time을 정수(초 단위)로 변환한 새 열 생성
-df['Second'] = df['Time'].astype(int)
-
-# 초 단위로 하나씩만 추출 (중복 제거)
-df_sorted = df.drop_duplicates(subset='Second').sort_values('Time').reset_index(drop=True)
-
-# r₀ 불러오기
-for _, row in df_sorted.iterrows():
-    try:
-        with open(cache_path, 'r') as f:
-            r0 = float(f.read().strip())  # 최신 r₀ 참조
-    except Exception as e:
-        print(f"[{int(row['Time'])}초] r₀ 캐시 읽기 실패: {e}")
-        continue
-
-    # 이후 r0 사용하여 mul 계산 등 진행
-
-
-print(f"[기준 내부저항 r₀] = {r0} Ω")
-
-# 경보 판단 함수
-def evaluate_mul_state(mul):
-    global path_mode, path_locked, last_alarm_level
-    mul = round(mul, 3)
-
-    # 정상 복귀 시 상태 초기화
-    if path_locked and 0.95 < mul < 1.05:
-        print("[복귀] 정상 범위로 복귀 → 경로 잠금 해제")
-        path_mode = None
-        path_locked = False
-        last_alarm_level = 0
-        return None
-
-    # 경로 진입 조건
-    if not path_locked:
-        if mul >= 0.9:
-            path_mode = '고온'
-            path_locked = True
-            last_alarm_level = alarm_levels['열화 시작']
-            return '열화 시작'
-        elif mul >= 1.1:
-            path_mode = '저온'
-            path_locked = True
-            return None  # 저온 진입 자체는 경고 없음
-
-    # 경보 단계 판단
-    if path_locked:
-        if path_mode == '고온':
-            if 1.1 <= mul < 1.3 and last_alarm_level < alarm_levels['열화 가속']:
-                last_alarm_level = alarm_levels['열화 가속']
-                return '열화 가속'
-            elif mul >= 1.3 and last_alarm_level < alarm_levels['열폭주 위험 경고']:
-                last_alarm_level = alarm_levels['열폭주 위험 경고']
-                return '열폭주 위험 경고'
-
-        elif path_mode == '저온':
-            if 1.7 <= mul < 2.5 and last_alarm_level < alarm_levels['성능 저하']:
-                last_alarm_level = alarm_levels['성능 저하']
-                return '성능 저하'
-            elif 2.5 <= mul < 4.0 and last_alarm_level < alarm_levels['성능 저하 가속']:
-                last_alarm_level = alarm_levels['성능 저하 가속']
-                return '성능 저하 가속'
-            elif mul >= 4.0 and last_alarm_level < alarm_levels['전원 차단']:
-                last_alarm_level = alarm_levels['전원 차단']
-                return '전원 차단'
-
-    return None
-
-# 데이터 불러오기 및 정수초 필터링
-df = pd.read_csv(raw_path, sep='\s+', skiprows=1, names=['Time', 'I', 'V1', 'Vload'])
-df['Time'] = pd.to_numeric(df['Time'], errors='coerce')
-df['RoundedTime'] = df['Time'].round(6)
-df_int = df[np.isclose(df['RoundedTime'] % 1, 0, atol=1e-6)]
-df_sorted = df_int.drop_duplicates(subset='RoundedTime').sort_values('RoundedTime')
-
-# 실시간 출력 루프
-print("\n[모니터링 시작 - 1초 단위 분석]")
-for _, row in df_sorted.iterrows():
-    t_sec = int(row['RoundedTime'])
-    I, V1, Vload = row['I'], row['V1'], row['Vload']
-    if I == 0:
-        print(f"[{t_sec}초] 전류=0 → 계산 불가")
-        continue
-
+def calculate_soh_and_r0(I, V1, Vload):
     r_input = (2 * V1 - Vload) / I - 0.0048
-    mul = r_input / r0
-    msg = evaluate_mul_state(mul)
+    closest_row = df_soh.iloc[(df_soh['Internal_Resistance'] - r_input).abs().idxmin()]
+    soh = int(closest_row['Cell_SOH'].replace('%', ''))
+    r0 = round(closest_row['Internal_Resistance'], 6)
+    return soh, r0, r_input
 
-    print(f"[{t_sec}초] I={round(I,3)}A, V1={round(V1,3)}V, Vload={round(Vload,3)}V → R_in={round(r_input,6)}Ω, mul={round(mul,4)}", end='')
-    if msg:
-        print(f" → [경고] {msg}")
+# 초기 분석: 첫 번째 행 기준
+df_init = load_test_data()
+row0 = df_init.iloc[0]                 # ← 첫 번째 행 사용!
+t0 = time.time()                       # 시스템 기준 시간 (기준 시각 저장)
+t_data0 = row0['Time']                 # 기준 데이터의 Time 필드 (예: 0.0초)
+
+# 최초 분석 실행
+I0, V10, Vload0 = row0[['I', 'V1', 'Vload']]
+soh0, r0_0, r_input0 = calculate_soh_and_r0(I0, V10, Vload0)
+
+# r0 저장
+with open(cache_path, 'w') as f:
+    f.write(str(r0_0))
+
+# 초기 결과 출력
+print(">> [초기 분석 결과]")
+print(f"→ 기준 Time: {t_data0:.1f}초 (test2.txt)")
+print(f"→ I: {I0} | V1: {V10} | Vload: {Vload0}")
+print(f"→ 내부저항 계산: {r_input0:.6f} Ω")
+print(f"→ 초기 r₀ = {r0_0} Ω | SOH = {soh0}%")
+
+# 사용자 입력 루프
+while True:
+    cmd = input("\nSOH를 갱신하려면 yes 입력 (종료: no) > ").strip().lower()
+    if cmd == "no":
+        print("분석 종료.")
+        break
+    elif cmd != "yes":
+        print("잘못된 입력입니다.")
+        continue
+
+    # 현재까지의 실제 경과 시간
+    elapsed_real = time.time() - t0
+    target_time = t_data0 + round(elapsed_real)
+
+    df_now = load_test_data()
+    match = df_now[np.isclose(df_now['Time'], target_time, atol=0.1)]
+
+    if match.empty:
+        print(f"※ {target_time:.1f}초 시점 데이터 없음 → 최신 데이터 사용")
+        row = df_now.iloc[-1]
     else:
-        print()
-    time.sleep(1)
+        row = match.iloc[0]
+
+    I, V1, Vload = row[['I', 'V1', 'Vload']]
+    soh, r0, r_input = calculate_soh_and_r0(I, V1, Vload)
+
+    # 캐시에 저장
+    with open(cache_path, 'w') as f:
+        f.write(str(r0))
+
+    print(f"\n[SOH 갱신 결과]")
+    print(f"→ 경과 시간: {elapsed_real:.1f}초 | 분석 Time: {row['Time']:.1f}초")
+    print(f"→ I: {I} | V1: {V1} | Vload: {Vload}")
+    print(f"→ 내부저항 계산: {r_input:.6f} Ω")
+    print(f"→ r₀ = {r0} Ω | SOH = {soh}%")
