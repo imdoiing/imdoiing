@@ -1,0 +1,91 @@
+import serial
+import pandas as pd
+import numpy as np
+import time
+
+# 시리얼 포트 연결
+ser = serial.Serial('COM3', 115200, timeout=1)
+time.sleep(2)  # 시리얼 초기화 대기
+
+cache_path = r"C:/Users/dohyu/Desktop/capstone/r0_cache.txt"
+
+# SOH 기준표 불러오기
+df_soh = pd.read_csv(r"C:/Users/dohyu/Desktop/capstone/soh_final22.csv")
+df_soh = df_soh.rename(columns={df_soh.columns[1]: 'Internal_Resistance'})
+df_soh['Internal_Resistance'] = pd.to_numeric(df_soh['Internal_Resistance'], errors='coerce')
+
+# ESP32에서 데이터 받기 함수
+def get_sensor_data():
+    while True:
+        line = ser.readline().decode().strip()
+        if not line:
+            continue
+        try:
+            I_str, V1_str, Vload_str = line.split()
+            I = float(I_str)
+            V1 = float(V1_str)
+            Vload = float(Vload_str)
+            return I, V1, Vload
+        except ValueError:
+            print(f"※ 잘못된 시리얼 데이터: '{line}' → 재시도")
+            continue
+
+# SOH 및 내부저항 계산 함수 (r0은 r_input 값 그대로 사용)
+def calculate_soh_and_r0(I, V1, Vload):
+    r_input = (2 * V1 - Vload) / I 
+    closest_row = df_soh.iloc[(df_soh['Internal_Resistance'] - r_input).abs().idxmin()]
+    soh = int(closest_row['Cell_SOH'].replace('%', ''))
+    r0 = round(r_input, 6)  # 기준표가 아닌 계산된 값 그대로 r0 사용
+    return soh, r0, r_input
+
+# 초기 분석: 첫 번째 데이터 기준
+print(">> 초기 데이터 수신 중...")
+I0, V10, Vload0 = get_sensor_data()
+
+t0 = time.time()  # 실시간 기준 시작 시각
+
+# 최초 SOH 및 r0 계산
+soh0, r0_0, r_input0 = calculate_soh_and_r0(I0, V10, Vload0)
+
+# r0 값 저장 (r_input 값 그대로)
+with open(cache_path, 'w') as f:
+    f.write(str(r0_0))
+
+# 초기 출력
+print(">> [분석 결과]")
+print(f"→ I: {I0} | V1: {V10} | Vload: {Vload0}")
+print(f"→ 내부저항 계산: {r_input0:.6f} Ω")
+print(f"→  r₀ = {r0_0} Ω (계산값 기준) | SOH = {soh0}%")
+
+# 사용자 명령 루프
+try:
+    while True:
+        cmd = input("\nSOH를 갱신하려면 yes 입력 (종료: no) > ").strip().lower()
+        if cmd == "no":
+            print("분석 종료.")
+            break
+        elif cmd != "yes":
+            print("잘못된 입력입니다.")
+            continue
+        
+        # 새로운 센서 데이터 받기
+        print(">> 새 데이터 수신 중...")
+        I, V1, Vload = get_sensor_data()
+        
+        # 분석 수행
+        soh, r0, r_input = calculate_soh_and_r0(I, V1, Vload)
+        
+        # 갱신된 r0 (r_input 기반) 저장
+        with open(cache_path, 'w') as f:
+            f.write(str(r0))
+        
+        # 결과 출력
+        print(f"\n[SOH 갱신 결과]")
+        print(f"→ I: {I} | V1: {V1} | Vload: {Vload}")
+        print(f"→ 내부저항 계산: {r_input:.6f} Ω")
+        print(f"→ r₀ = {r0} Ω (계산값 기준) | SOH = {soh}%")
+
+except KeyboardInterrupt:
+    print("\n[사용자 중단]")
+finally:
+    ser.close()
