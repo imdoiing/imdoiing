@@ -5,7 +5,7 @@ import time
 
 # 블루투스 연결 설정
 device_name = "ESP32-BT-Slave"  # Arduino에서 설정한 이름
-port = 1  # SPP 포트 번호
+port = 3  # SPP 포트 번호
 
 print("블루투스 장치 검색 중...")
 
