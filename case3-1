@@ -2,181 +2,90 @@ import serial
 import pandas as pd
 import numpy as np
 import time
-import os
 
 # 시리얼 포트 연결
-try:
-    ser = serial.Serial('COM3', 115200, timeout=1)
-    time.sleep(2)  # 시리얼 초기화 대기
-    print("시리얼 포트 연결 성공")
-except serial.SerialException as e:
-    print(f"시리얼 포트 연결 실패: {e}")
-    exit(1)
+ser = serial.Serial('COM3', 115200, timeout=1)
+time.sleep(2)  # 시리얼 초기화 대기
 
 cache_path = r"C:/Users/dohyu/Desktop/capstone/r0_cache.txt"
 
 # SOH 기준표 불러오기
-try:
-    df_soh = pd.read_csv(r"C:/Users/dohyu/Desktop/capstone/soh_final22.csv")
-    df_soh = df_soh.rename(columns={df_soh.columns[1]: 'Internal_Resistance'})
-    df_soh['Internal_Resistance'] = pd.to_numeric(df_soh['Internal_Resistance'], errors='coerce')
-    df_soh = df_soh.dropna(subset=['Internal_Resistance'])  # NaN 값 제거
-    print(f"SOH 기준표 로드 완료: {len(df_soh)}개 데이터")
-except Exception as e:
-    print(f"SOH 기준표 로드 실패: {e}")
-    exit(1)
+df_soh = pd.read_csv(r"C:/Users/dohyu/Desktop/capstone/soh_final22.csv")
+df_soh = df_soh.rename(columns={df_soh.columns[1]: 'Internal_Resistance'})
+df_soh['Internal_Resistance'] = pd.to_numeric(df_soh['Internal_Resistance'], errors='coerce')
 
-# ESP32에서 데이터 받기 함수 (개선된 파싱)
+# ESP32에서 데이터 받기 함수
 def get_sensor_data():
-    retry_count = 0
-    max_retries = 10
-    
-    while retry_count < max_retries:
+    while True:
+        line = ser.readline().decode().strip()
+        if not line:
+            continue
         try:
-            line = ser.readline().decode('utf-8').strip()
-            if not line:
-                retry_count += 1
+            parts = line.split(',')
+            if len(parts) != 3:
                 continue
-            
-            print(f"수신된 데이터: '{line}'")  # 디버깅용
-            
-            # 현재 Arduino 출력 형식에 맞춰 파싱
-            # 예: "0.12345 A1.234 V5.678 V (Vload)"
-            parts = line.split()
-            if len(parts) < 4:
-                print(f"※ 데이터 형식 오류: 예상 4개 이상, 실제 {len(parts)}개")
-                retry_count += 1
-                continue
-            
-            # 'A', 'V', 'V' 문자 제거하고 숫자만 추출
-            I_str = parts[0].replace('A', '')
-            V1_str = parts[1].replace('V', '') 
-            Vload_str = parts[2].replace('V', '')
-            
-            I = float(I_str)
-            V1 = float(V1_str)
-            Vload = float(Vload_str)
-            
-            # 데이터 유효성 검사
-            if I <= 0:
-                print("※ 전류값이 0 이하입니다. 재시도...")
-                retry_count += 1
-                continue
-            
-            if V1 <= 0 or Vload <= 0:
-                print("※ 전압값이 0 이하입니다. 재시도...")
-                retry_count += 1
-                continue
-                
+            I = float(parts[0])
+            V1 = float(parts[1])
+            Vload = float(parts[2])
             return I, V1, Vload
-            
-        except (ValueError, IndexError) as e:
-            print(f"※ 파싱 오류: '{line}' → {e}")
-            retry_count += 1
+        except ValueError:
+            print(f"※ 잘못된 시리얼 데이터: '{line}' → 재시도")
             continue
-        except UnicodeDecodeError as e:
-            print(f"※ 인코딩 오류: {e}")
-            retry_count += 1
-            continue
-    
-    raise Exception(f"{max_retries}번 시도 후에도 유효한 데이터를 받지 못했습니다.")
 
-# SOH 및 내부저항 계산 함수
+# SOH 및 내부저항 계산 함수 (r0은 r_input 값 그대로 사용)
 def calculate_soh_and_r0(I, V1, Vload):
-    try:
-        # 내부저항 계산 (공식 검증 필요)
-        r_input = (2 * V1 - Vload) / I 
-        
-        if r_input < 0:
-            print(f"※ 경고: 계산된 내부저항이 음수입니다 ({r_input:.6f} Ω)")
-            print(f"   → I: {I}, V1: {V1}, Vload: {Vload}")
-            print("   → 회로 연결이나 계산 공식을 확인하세요.")
-        
-        # 가장 가까운 SOH 값 찾기
-        closest_idx = (df_soh['Internal_Resistance'] - abs(r_input)).abs().idxmin()
-        closest_row = df_soh.iloc[closest_idx]
-        
-        soh_str = str(closest_row['Cell_SOH']).replace('%', '')
-        soh = int(float(soh_str))
-        
-        r0 = round(r_input, 6)  # 계산된 값 그대로 사용
-        
-        return soh, r0, r_input
-        
-    except Exception as e:
-        print(f"SOH 계산 오류: {e}")
-        return None, None, None
+    r_input = (2 * V1 - Vload) / I 
+    closest_row = df_soh.iloc[(df_soh['Internal_Resistance'] - r_input).abs().idxmin()]
+    soh = int(closest_row['Cell_SOH'].replace('%', ''))
+    r0 = round(r_input, 6)  # 기준표가 아닌 계산된 값 그대로 r0 사용
+    return soh, r0, r_input
 
 # 초기 분석: 첫 번째 데이터 기준
 print(">> 초기 데이터 수신 중...")
-try:
-    I0, V10, Vload0 = get_sensor_data()
-    t0 = time.time()  # 실시간 기준 시작 시각
+I0, V10, Vload0 = get_sensor_data()
+t0 = time.time()  # 실시간 기준 시작 시각
 
-    # 최초 SOH 및 r0 계산
-    soh0, r0_0, r_input0 = calculate_soh_and_r0(I0, V10, Vload0)
+# 최초 SOH 및 r0 계산
+soh0, r0_0, r_input0 = calculate_soh_and_r0(I0, V10, Vload0)
 
-    if soh0 is None:
-        print("초기 SOH 계산 실패")
-        exit(1)
+# r0 값 저장 (r_input 값 그대로)
+with open(cache_path, 'w') as f:
+    f.write(str(r0_0))
 
-    # r0 값 저장
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    with open(cache_path, 'w') as f:
-        f.write(str(r0_0))
-
-    # 초기 출력
-    print("\n>> [초기 분석 결과]")
-    print(f"→ I: {I0:.5f} A | V1: {V10:.3f} V | Vload: {Vload0:.3f} V")
-    print(f"→ 내부저항 계산: {r_input0:.6f} Ω")
-    print(f"→ r₀ = {r0_0:.6f} Ω | SOH = {soh0}%")
-
-except Exception as e:
-    print(f"초기 데이터 수신 실패: {e}")
-    ser.close()
-    exit(1)
+# 초기 출력
+print(">> [분석 결과]")
+print(f"→ I: {I0} | V1: {V10} | Vload: {Vload0}")
+print(f"→ 내부저항 계산: {r_input0:.6f} Ω")
+print(f"→  r₀ = {r0_0} Ω (계산값 기준) | SOH = {soh0}%")
 
 # 사용자 명령 루프
 try:
     while True:
-        cmd = input("\nSOH를 갱신하려면 'yes' 입력 (종료: 'no') > ").strip().lower()
-        
+        cmd = input("\nSOH를 갱신하려면 yes 입력 (종료: no) > ").strip().lower()
         if cmd == "no":
             print("분석 종료.")
             break
         elif cmd != "yes":
-            print("잘못된 입력입니다. 'yes' 또는 'no'를 입력하세요.")
+            print("잘못된 입력입니다.")
             continue
         
-        try:
-            # 새로운 센서 데이터 받기
-            print(">> 새 데이터 수신 중...")
-            I, V1, Vload = get_sensor_data()
-            
-            # 분석 수행
-            soh, r0, r_input = calculate_soh_and_r0(I, V1, Vload)
-            
-            if soh is None:
-                print("SOH 계산 실패, 다시 시도하세요.")
-                continue
-            
-            # 갱신된 r0 저장
-            with open(cache_path, 'w') as f:
-                f.write(str(r0))
-            
-            # 결과 출력
-            print(f"\n[SOH 갱신 결과]")
-            print(f"→ I: {I:.5f} A | V1: {V1:.3f} V | Vload: {Vload:.3f} V")
-            print(f"→ 내부저항 계산: {r_input:.6f} Ω")
-            print(f"→ r₀ = {r0:.6f} Ω | SOH = {soh}%")
-            print(f"→ DCIR (내부저항) = {abs(r_input):.6f} Ω")
-            
-        except Exception as e:
-            print(f"데이터 처리 중 오류: {e}")
-            continue
-
+        # 새로운 센서 데이터 받기
+        print(">> 새 데이터 수신 중...")
+        I, V1, Vload = get_sensor_data()
+        
+        # 분석 수행
+        soh, r0, r_input = calculate_soh_and_r0(I, V1, Vload)
+        
+        # 갱신된 r0 (r_input 기반) 저장
+        with open(cache_path, 'w') as f:
+            f.write(str(r0))
+        
+        # 결과 출력
+        print(f"\n[SOH 갱신 결과]")
+        print(f"→ I: {I} | V1: {V1} | Vload: {Vload}")
+        print(f"→ 내부저항 계산: {r_input:.6f} Ω")
+        print(f"→ r₀ = {r0} Ω (계산값 기준) | SOH = {soh}%")
 except KeyboardInterrupt:
     print("\n[사용자 중단]")
 finally:
     ser.close()
-    print("시리얼 포트 연결 종료")
