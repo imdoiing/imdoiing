@@ -1,0 +1,73 @@
+#include "BluetoothSerial.h"
+#include <Wire.h>
+#include <Adafruit_INA219.h>
+
+String device_name = "ESP32-BT-Slave";
+
+// Check if Bluetooth is available
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+#error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
+#endif
+
+// Check Serial Port Profile
+#if !defined(CONFIG_BT_SPP_ENABLED)
+#error Serial Port Profile for Bluetooth is not available or not enabled. It is only available for the ESP32 chip.
+#endif
+
+BluetoothSerial SerialBT;
+Adafruit_INA219 ina219;
+
+const int V1_pin = 33;
+
+void setup() {
+  Serial.begin(115200);
+  SerialBT.begin(device_name); // 블루투스 디바이스 이름
+  
+  // INA219 초기화
+  Wire.begin();
+  if (!ina219.begin()) {
+    Serial.println("INA219 not found. Check wiring!");
+    SerialBT.println("INA219 not found. Check wiring!");
+    while (1); // 멈춤
+  }
+  
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+  
+  Serial.printf("The device with name \"%s\" is started.\nNow you can pair it with Bluetooth!\n", device_name.c_str());
+  SerialBT.printf("The device with name \"%s\" is started and ready!\n", device_name.c_str());
+}
+
+void loop() {
+  // 시리얼에서 블루투스로 데이터 전송 (기존 기능 유지)
+  if (Serial.available()) {
+    SerialBT.write(Serial.read());
+  }
+  
+  // 블루투스에서 시리얼로 데이터 전송 (기존 기능 유지)
+  if (SerialBT.available()) {
+    Serial.write(SerialBT.read());
+  }
+  
+  // 전압/전류 측정
+  float current_A = ina219.getCurrent_mA() / 1000.0; // A 단위
+  float Vload = ina219.getBusVoltage_V(); // 부하 전압 (V)
+  float V1 = analogRead(V1_pin) * (3.3 / 4095.0) * 2.0; // 분압 보정
+  
+  // 시리얼 모니터에 기존 형식으로 출력 (디버깅용)
+  Serial.print(current_A, 5);
+  Serial.print(" A");
+  Serial.print(V1, 3);
+  Serial.print(" V");
+  Serial.print(Vload, 3);
+  Serial.println(" V (Vload)");
+  
+  // 블루투스로는 Python이 기대하는 CSV 형식으로 전송
+  SerialBT.print(current_A, 5);
+  SerialBT.print(",");
+  SerialBT.print(V1, 3);
+  SerialBT.print(",");
+  SerialBT.println(Vload, 3);
+  
+  delay(1000);
+}
