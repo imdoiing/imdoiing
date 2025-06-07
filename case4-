@@ -228,7 +228,7 @@ try:
             continue
 
         # DCIR 계산
-        r_input = (2 * V1 - Vload) / I - 0.0048
+        r_input = (2 * V1 - Vload) / I 
         multiple_of_ir = r_input / r0
         msg = None
 
