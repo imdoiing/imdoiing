@@ -1,0 +1,239 @@
+import serial
+import pandas as pd
+import time
+import re
+
+# 시리얼 연결 설정
+port_name = "COM6"
+print(f"사용할 포트: {port_name}")
+
+# 시리얼 연결 설정
+try:
+    # 아두이노는 보통 9600 baud rate 사용
+    ser = serial.Serial(
+        port=port_name,
+        baudrate=9600,  # 아두이노 기본값
+        bytesize=serial.EIGHTBITS,
+        parity=serial.PARITY_NONE,
+        stopbits=serial.STOPBITS_ONE,
+        timeout=1
+    )
+    print(f"시리얼 포트 연결 성공! ({port_name})")
+    time.sleep(2)  # 연결 안정화 대기
+except Exception as e:
+    print(f"시리얼 포트 연결 실패: {e}")
+    exit(1)
+
+cache_path = r"C:/Users/dohyu/Desktop/capstone/r0_cache.txt"
+
+# 경고 단계 우선순위 정의
+alarm_levels = {
+    '열화 시작': 1,
+    '열화 가속': 2,
+    '열폭주 위험 경고': 3,
+    '성능 저하': 4,
+    '성능 저하 가속': 5,
+    '전원 차단': 6
+}
+
+# 상태 변수 초기화
+path_mode = None
+path_locked = False
+last_alarm_level = 0
+high_temp_pending = 0
+high_temp_pending_values = []
+high_temp_recovery_count = 0
+
+# 아두이노에서 시리얼로 데이터 받기 함수
+def get_sensor_data():
+    while True:
+        try:
+            # 시리얼 버퍼 비우기
+            ser.flushInput()
+            
+            # 한 줄 읽기
+            line = ser.readline().decode('utf-8').strip()
+            
+            if not line or "전압 측정 시작" in line:
+                continue
+            
+            
+            # 아두이노에서 CSV 형식으로 보내는 데이터: "0.12345,3.456,1.234"
+            if ',' in line:
+                parts = line.split(',')
+                if len(parts) == 3:
+                    I = float(parts[0])
+                    V1 = float(parts[1])
+                    Vload = float(parts[2])
+                    return I, V1, Vload
+            
+            print(f"※ 데이터 파싱 실패: '{line}' → 재시도")
+            continue
+            
+        except (ValueError, UnicodeDecodeError) as e:
+            print(f"※ 데이터 처리 오류: {e} → 재시도")
+            time.sleep(0.1)
+            continue
+
+def evaluate_high_temp_path(multiple_of_ir):
+    global path_mode, path_locked, last_alarm_level
+    global high_temp_pending, high_temp_pending_values, high_temp_recovery_count
+
+    # 고온 경로 진입
+    if not path_locked and multiple_of_ir <= 0.95:
+        path_mode = '고온'
+        path_locked = True
+        last_alarm_level = alarm_levels['열화 시작']
+        high_temp_pending = 0
+        high_temp_pending_values = []
+        high_temp_recovery_count = 0
+        print(f"[진입] 고온 경로 진입")
+        return '열화 시작'
+
+    # 고온 경로 유지
+    if path_locked and path_mode == '고온':
+
+        # 보류 상태 중
+        if high_temp_pending > 0:
+            high_temp_pending_values.append(multiple_of_ir)
+            high_temp_pending -= 1
+            print(f"[관찰중] 안정화 판단 보류 {3 - high_temp_pending}/3")
+
+            # 재열화 감지
+            if multiple_of_ir > 1.05 or multiple_of_ir < 0.95:
+                print(f"[재열화] 안정화 보류 중 재열화 감지 (multiple_of_ir={round(multiple_of_ir, 4)})")
+                path_mode = '고온'
+                path_locked = True
+                high_temp_pending = -1  # 봉인 상태
+                high_temp_pending_values = []
+                high_temp_recovery_count = 0
+                last_alarm_level = 0  # 경보 초기화
+
+                if multiple_of_ir >= 1.3:
+                    last_alarm_level = alarm_levels['열폭주 위험 경고']
+                    return '열폭주 위험 경고'
+                elif multiple_of_ir >= 1.1:
+                    last_alarm_level = alarm_levels['열화 가속']
+                    return '열화 가속'
+                elif multiple_of_ir < 0.95:
+                    last_alarm_level = alarm_levels['열화 시작']
+                    return '열화 시작'
+            return None
+
+        # 보류 종료 후 복귀 판단
+        if high_temp_pending == 0 and high_temp_pending_values:
+            if all(0.95 <= v <= 1.05 for v in high_temp_pending_values):
+                print("[복귀] 고온 경로 안정화 확인 → 경로 초기화, 배터리 상태 안정화")
+                path_mode = None
+                path_locked = False
+                last_alarm_level = 0
+                high_temp_recovery_count = 0
+            high_temp_pending_values = []
+            return None
+
+        # 안정화 관찰 재시작 가능 (재열화 후 포함)
+        if high_temp_pending <= 0 and not high_temp_pending_values and 0.95 <= multiple_of_ir <= 1.05:
+            high_temp_pending = 3
+            high_temp_pending_values = [multiple_of_ir]
+            print("[관찰시작] 고온 경로 안정화 여부 판단 시작")
+            return None
+
+        # 경보 판단
+        if high_temp_pending in [0, -1]:
+            if multiple_of_ir >= 1.3 and last_alarm_level < alarm_levels['열폭주 위험 경고']:
+                last_alarm_level = alarm_levels['열폭주 위험 경고']
+                return '열폭주 위험 경고'
+            elif multiple_of_ir >= 1.1 and last_alarm_level < alarm_levels['열화 가속']:
+                last_alarm_level = alarm_levels['열화 가속']
+                return '열화 가속'
+            elif multiple_of_ir < 0.95 and last_alarm_level < alarm_levels['열화 시작']:
+                last_alarm_level = alarm_levels['열화 시작']
+                return '열화 시작'
+
+    return None
+
+def evaluate_low_temp_path(multiple_of_ir):
+    global path_mode, path_locked, last_alarm_level
+
+    if path_locked and path_mode == '저온' and 0.95 < multiple_of_ir < 1.05:
+        print("[복귀] 저온 경로 정상 범위 복귀 → 경로 잠금 해제")
+        path_mode = None
+        path_locked = False
+        last_alarm_level = 0
+        return None
+
+    if not path_locked and multiple_of_ir >= 1.1:
+        path_mode = '저온'
+        path_locked = True
+        print(f"[진입] 저온 경로 진입")
+
+    if path_locked and path_mode == '저온':
+        if multiple_of_ir >= 4.0 and last_alarm_level < alarm_levels['전원 차단']:
+            last_alarm_level = alarm_levels['전원 차단']
+            return '전원 차단'
+        elif 2.5 <= multiple_of_ir < 4.0 and last_alarm_level < alarm_levels['성능 저하 가속']:
+            last_alarm_level = alarm_levels['성능 저하 가속']
+            return '성능 저하 가속'
+        elif 1.7 <= multiple_of_ir < 2.5 and last_alarm_level < alarm_levels['성능 저하']:
+            last_alarm_level = alarm_levels['성능 저하']
+            return '성능 저하'
+
+    return None
+
+# 실시간 출력 루프
+print("\n[모니터링 시작 - 아두이노 시리얼 실시간 DCIR 분석]")
+print("시리얼 포트 연결 완료!")
+
+try:
+    while True:
+        # r₀ 캐시 읽기
+        try:
+            with open(cache_path, 'r') as f:
+                r0 = float(f.read().strip())
+        except Exception as e:
+            print(f"※ r₀ 캐시 읽기 실패: {e}")
+            time.sleep(1)
+            continue
+
+        # 아두이노에서 시리얼로 데이터 받기
+        I, V1, Vload = get_sensor_data()
+
+        if I == 0:
+            print(f"전류=0 또는 데이터 수신 실패 → 계산 불가")
+            time.sleep(1)
+            continue
+
+        # DCIR 계산
+        r_input = (2 * V1 - Vload) / I 
+        multiple_of_ir = r_input / r0
+        msg = None
+
+        # 경로 평가
+        if path_mode == '고온':
+            msg = evaluate_high_temp_path(multiple_of_ir)
+        elif path_mode == '저온':
+            msg = evaluate_low_temp_path(multiple_of_ir)
+        else:
+            if multiple_of_ir <= 0.95:
+                msg = evaluate_high_temp_path(multiple_of_ir)
+            elif multiple_of_ir >= 1.1:
+                msg = evaluate_low_temp_path(multiple_of_ir)
+
+        # 결과 출력
+        print(f"I={round(I,3)}A, V1={round(V1,3)}V, Vload={round(Vload,3)}V → R_in={round(r_input,6)}Ω, multiple_of_ir={round(multiple_of_ir,4)}", end='')
+
+        if msg:
+            print(f" → [경고] {msg}")
+        else:
+            print()
+
+        time.sleep(1)
+
+except KeyboardInterrupt:
+    print("\n[사용자 중단]")
+except Exception as e:
+    print(f"\n[오류 발생]: {e}")
+finally:
+    if 'ser' in locals():
+        ser.close()
+        print("시리얼 포트 연결 종료")
