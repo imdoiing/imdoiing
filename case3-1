@@ -15,10 +15,10 @@ print(f"사용할 포트: {port_name}")
 
 # 시리얼 연결 설정
 try:
-    # ESP32는 보통 115200 baud rate 사용
+    # 아두이노는 보통 9600 baud rate 사용
     ser = serial.Serial(
         port=port_name,
-        baudrate=115200,  # ESP32 기본값, 필요시 9600으로 변경
+        baudrate=9600,  # 아두이노 기본값
         bytesize=serial.EIGHTBITS,
         parity=serial.PARITY_NONE,
         stopbits=serial.STOPBITS_ONE,
@@ -37,7 +37,7 @@ df_soh = pd.read_csv(r"C:/Users/dohyu/Desktop/capstone/soh_final22.csv")
 df_soh = df_soh.rename(columns={df_soh.columns[1]: 'Internal_Resistance'})
 df_soh['Internal_Resistance'] = pd.to_numeric(df_soh['Internal_Resistance'], errors='coerce')
 
-# ESP32에서 시리얼로 데이터 받기 함수
+# 아두이노에서 시리얼로 데이터 받기 함수
 def get_sensor_data():
     while True:
         try:
@@ -47,17 +47,20 @@ def get_sensor_data():
             # 한 줄 읽기
             line = ser.readline().decode('utf-8').strip()
             
-            if not line:
-                continue
-                
-            parts = line.split(',')
-            if len(parts) != 3:
+            if not line or "전압 측정 시작" in line:
                 continue
             
-            I = float(parts[0])
-            V1 = float(parts[1])
-            Vload = float(parts[2])
-            return I, V1, Vload
+            # 아두이노에서 CSV 형식으로 보내는 데이터 파싱
+            if ',' in line:
+                parts = line.split(',')
+                if len(parts) == 3:
+                    I = float(parts[0])     # 전류
+                    V1 = float(parts[1])    # V1 (저항 하단 전압)  
+                    Vload = float(parts[2]) # Vload (A2 전압)
+                    return I, V1, Vload
+            
+            print(f"※ 데이터 파싱 실패: '{line}' → 재시도")
+            continue
             
         except Exception as e:
             print(f"※ 잘못된 시리얼 데이터: '{line}' → 재시도")
