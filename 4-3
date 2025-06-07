@@ -50,10 +50,7 @@ high_temp_recovery_count = 0
 
 # 아두이노에서 시리얼로 데이터 받기 함수
 def get_sensor_data():
-    retry_count = 0
-    max_retries = 1  # 재시도 1회
-    
-    while retry_count <= max_retries:
+    while True:
         try:
             # 시리얼 버퍼 비우기
             ser.flushInput()
@@ -62,11 +59,8 @@ def get_sensor_data():
             line = ser.readline().decode('utf-8').strip()
             
             if not line or "전압 측정 시작" in line:
-                retry_count += 1
-                time.sleep(0.1)
                 continue
             
-            print(f"수신된 원본 데이터: '{line}'")
             
             # 아두이노에서 CSV 형식으로 보내는 데이터: "0.12345,3.456,1.234"
             if ',' in line:
@@ -78,17 +72,12 @@ def get_sensor_data():
                     return I, V1, Vload
             
             print(f"※ 데이터 파싱 실패: '{line}' → 재시도")
-            retry_count += 1
             continue
             
         except (ValueError, UnicodeDecodeError) as e:
             print(f"※ 데이터 처리 오류: {e} → 재시도")
-            retry_count += 1
             time.sleep(0.1)
             continue
-    
-    print("※ 재시도 실패 - 기본값 반환")
-    return 0, 0, 0
 
 def evaluate_high_temp_path(multiple_of_ir):
     global path_mode, path_locked, last_alarm_level
